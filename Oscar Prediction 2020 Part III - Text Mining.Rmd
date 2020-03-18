@@ -1,0 +1,500 @@
+---
+title: "Movie Analysis"
+author: "[Yun Yan](https://github.com/yyyoment)"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+# !!! You can add your social media info here. Mail, Linkedin, Instagram, Github, Twitter are now available. Or just delete the field for no social media icon.
+mail: "yyan5@nd.edu"
+linkedin: "yan-yun"
+github: "yyyoment"
+home: "yyyoment.github.io/yan-yun/"
+# !!! You need to provide a logo and background image here !!! Or just delete the field for no image
+logo: "logo.jpg"
+bg: "5.png"
+# !!! You can specify the theme color here
+color: "#AB86B9"
+output:
+  ndrmd::ndrmd1:
+    toc: TRUE
+    number_sections: FALSE
+    code_folding: "show"
+---
+
+<style>
+div.color {
+    background-color:rgba(105, 179, 172, 0.15); 
+    border-radius: 9px; 
+    padding: 20px;
+    font-weight:500;
+    font-size: 18px;
+}
+</style>
+
+<br><br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE,error=FALSE,fig.align="center")
+library(tidyverse)
+library(tm)
+library(tidytext)
+library(wordcloud2)
+library(plotly)
+library(lme4)
+library(rsample)
+library(keras)
+library(caret)
+library(DMwR)
+options(scipen=999)
+```
+
+> A fun fact: The header picture is actually made by **tensorflow** based on the original Parasite movie poster:)))
+
+# Load the data
+***
+```{r}
+rm(list=ls())
+oscar <- read_csv("E:/Downloads/6.csv")
+```
+
+```{r}
+oscar <- oscar %>% 
+  mutate_at(c('budget','gross'), ~as.numeric(format(., scientific=F))) %>% 
+  select(nominees,details,year,winner,metabase,rating,genres,budget,gross,minute,`American Cinema Editors`,BAFTA,`Chicago Film Critics`,`Critics Choice`,`Golden Globes`,Satellite,date,score,review) %>% 
+  mutate(genre=str_extract(genres, "([A-Z])\\w+")) %>% 
+  mutate(genre=as.factor(genre)) %>% 
+  mutate(winner=ifelse(nominees=='Parasite',1,winner)) %>% 
+  mutate(winner=ifelse(nominees=='1917',0,winner))
+summary(oscar)
+dim(oscar)
+```
+
+The median review score from Rotten Tomato website is relatively stable across different year. However, we also notice that the variability is more obvious in recent years than before. It may indicate that the oscar award standard has been changed and the rating may be not that important anymore.
+
+```{r}
+oscar %>% 
+  filter(as.integer(year)>2000) %>% 
+  ggplot()+
+  geom_boxplot(aes(x=as.factor(year),y=score,color=as.factor(year)),alpha=0.4)+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  theme(legend.position="none")+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank())+
+  labs(title = 'Relationship b/w Year & Review Score')+
+  ylim(0,1)
+
+```
+
+# Clean the Text
+***
+
+A function has been created to clean the corpus.
+
+```{r}
+review_source <- VectorSource(oscar$review) # interprets each element as a DSI. 
+review_corpus <- VCorpus(review_source) # creates volatile Corpus object. 
+
+# create a function to clean the corpus
+clean_corpus <- function(corpus){
+
+  # http://bit.ly/2lfOfG2. require instead of library w/in function call. 
+  require(tm) 
+  require(qdap)
+  require(magrittr)
+  require(textstem)
+  
+  # manual replacement with spaces. removePunctuation() will not do this.
+  to_space <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+  corpus <- tm_map(corpus, to_space, "\\.")   # sometimes no space b/w sentences and period.
+  
+  corpus <- corpus %>%
+    tm_map(content_transformer(tolower)) %>% 
+    tm_map(removeWords, c(stopwords("en"),tolower((unique(oscar$nominees))),"movie","film","spanish")) %>% 
+    tm_map(stripWhitespace) %>% 
+    tm_map(removeNumbers) %>% # I noticed numbers are messy to work with. 
+    tm_map(content_transformer(replace_symbol)) %>% # qdap. e.g. % = 'percent'
+    tm_map(removePunctuation) %>% # including curly {} and round () brackets.
+    tm_map(content_transformer(replace_contraction)) %>% # qdap. e.g. shouldn't replaced by 'should not'
+    tm_map(content_transformer(replace_abbreviation)) %>% # qdap. data(abbreviations)
+    tm_map(content_transformer(tolower)) %>% 
+    tm_map(str_squish) %>% 
+    tm_map(lemmatize_strings) 
+  return(corpus)
+}
+
+review_corpus_clean <- clean_corpus(review_corpus)
+review_corpus[[65]][[1]];review_corpus_clean[[65]][[1]]
+```
+
+We can compare the reviews before and after the cleansing.
+
+Then, we try to bind the cleansed pro and con reviews back to the original dataframe.
+
+```{r}
+review_clean <- vector("character", nrow(oscar))
+for (text in 1:nrow(oscar)) {
+  review_clean[text] <- review_corpus_clean[[text]][[1]]
+}
+
+oscar1 <- bind_cols(oscar,data.frame(review_clean, stringsAsFactors = FALSE))
+
+# remove tm corpus source and original corpus. 
+remove(review_corpus_clean, review_clean,review_corpus, review_source)
+```
+
+# Parasite
+***
+
+Parasite won the 2020 Oscar Best Picture. We first want to explore this specific movie.
+
+## Word Cloud
+
+```{r fig.width=8}
+oscar1 %>%
+  filter(nominees=='Parasite') %>% 
+  unnest_tokens(., word, review_clean) %>% 
+  anti_join(stop_words) %>% 
+  count(word, sort = TRUE) %>% 
+  filter(n > 5) %>%
+  na.omit() %>% 
+  wordcloud2(shape = "diamond",size=1,backgroundColor = 'black',color = "random-light")
+```
+
+It is not surprising that 'Bong Joonho', the name of the director has been mentioned so many times. He took most of the credit of this successful movie. In addition, we can see some really positive words, such as 'masterpiece', 'masterful' and 'perfect'. It seems to have a really good reputation among reviews. Moreover, there also some words relevant to the topic of the movie, such as 'satire', 'inequality' and 'class'.
+
+## TF-IDF
+
+```{r}
+library(dplyr)
+library(tidytext)
+
+df <- data.frame()
+
+for (i in unique(oscar1$nominees)){
+temp <- oscar1 %>% 
+  filter(nominees == i) %>% 
+  select(review_clean) %>% 
+  bind()
+
+temp1 = data.frame(movie = i, 
+                      review = temp, 
+                      stringsAsFactors = FALSE)
+df <- rbind(df,temp1)
+}
+
+songTF = df %>% 
+  split(., .$movie) %>%
+  lapply(., function(x) {
+    songTokens = tm::MC_tokenizer(x$review)
+    tokenCount = as.data.frame(summary(as.factor(songTokens), maxsum = 1000))
+    total = length(songTokens)
+    tokenCount = data.frame(count = tokenCount[[1]], 
+                            word = row.names(tokenCount),
+                            total = total,
+                            song = x$movie,
+                            row.names = NULL)
+    return(tokenCount)
+    }) 
+
+songTF = do.call("rbind", songTF)  
+
+songTF$tf = songTF$count/songTF$total
+
+idfDF = songTF %>% 
+  group_by(word) %>% 
+  count() %>% 
+  mutate(idf = log((length(unique(songTF$song)) / n)))
+
+tfidfData = merge(songTF, idfDF, by = "word")
+
+tfidfData$tfIDF = tfidfData$tf * tfidfData$idf
+
+tfidfData %>% 
+  group_by(song) %>% 
+  filter(song == 'Parasite') %>% 
+  arrange(song, desc(tfIDF)) %>% 
+  filter(word!= '(Other)') %>% 
+  slice(1:15) %>% 
+  ggplot(aes(x=reorder(word,-tfIDF),y=tfIDF,fill=-tfIDF))+
+  geom_col()+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  theme(legend.position="none")+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank())
+```
+
+The TF-IDF plot also emphasized the uniqueness and success of this movie for telling a story about inequality and reflecting the real social situations.
+
+# Ratings
+
+## Sentiment Analysis
+***
+
+Next I conducted the sentiment analysis. Using the `afinn` dictionary, I was able to quantify each critic reviews and examine the relationship between the sentiment score and the rating.
+
+```{r width=c('50%', '50%'), fig.show='hold'}
+# sentiment analysis
+
+oscar2 <- oscar1
+
+oscar2$label <- seq.int(nrow(oscar2))
+
+senti <- oscar2 %>% 
+  unnest_tokens(output=word,input=review_clean) %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(label) %>% 
+  summarize(meanSentiment = mean(value)) %>% 
+  left_join(oscar2)
+
+senti %>% 
+  group_by(year,winner) %>% 
+  summarise(senti=mean(meanSentiment)) %>% 
+  ggplot(aes(year,senti,color=as.factor(winner)))+
+  geom_smooth(se=FALSE)+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank())
+
+senti %>% 
+  group_by(year,winner) %>% 
+  summarise(score=mean(score)) %>% 
+  ggplot(aes(year,score,color=as.factor(winner)))+
+  geom_smooth(se=FALSE)+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank())
+```
+
+We found that 1)in the earlier times, the sentiment of reviews are much higher than nowadays. 2)there is a time from 2005 to 2015 that the movie that critics did not hold a positive attitude towards would win the oscar. However, there seems to be a new trend in the future that the movie that critics have higher sentiment score on would take the lead and win the award again.
+
+Also, we need to keep in mind that if the movie has a sad ending, the reviews may mention it, which would lower the sentiment score.
+
+
+```{r}
+t.test(meanSentiment~winner,senti)
+```
+
+However, the overall T-test is not significant here. With that being said, there is no significant different from the mean sentiment score of the two groups.
+
+```{r}
+senti %>% 
+  group_by(genre,winner) %>% 
+  summarise(senti=mean(meanSentiment)) %>% 
+  ggplot(aes(genre,senti,fill=as.factor(winner)))+
+  geom_bar(stat = "identity", position = 'dodge')+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank())
+```
+
+Our findings were 1)no horror or animation movie has won a Oscar. As for movies in Action and Adventure genre, the winner movies have a significantly higher sentiment score while the winner movies would have a slightly lower sentiment scores in Biography, Comedy, Crime, Drama. It may result from the fact that the stories for crime or drama would be more complicated and may cause some depressive thoughts. The sentiment scores of Action and Adventure can have more predictive power for who would win the Oscar. 
+
+## Correlation
+
+```{r}
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+sp_n <- senti %>% select(-label) %>% group_by(nominees) %>% mutate(score=mean(score),meanSentiment=mean(meanSentiment)) %>% keep(is.numeric) %>% distinct()  %>% mutate_all(~normalize(.)) %>% discard(~all(is.na(.x))) %>% select(-year)
+library(corrplot)
+corrplot.mixed(cor(sp_n), lower = "number", upper = "square", tl.pos='lt',order = "FPC",
+               tl.cex=0.7,tl.srt=45,number.cex=0.9,diag='l')
+```
+
+The score and metabase are highly relevant, which makes sense because one is the critic review score from Rotten Tomato website while the other one is the critic review score from IMDB. We can also see that there are some awards that related to each other. It means that we may be able to use the results from some awards to predict the other ones.
+
+## Regression
+
+```{r}
+lm <-  lm(data=senti,score~meanSentiment+gross+budget+minute+BAFTA+`Critics Choice`+`Golden Globes`+`Chicago Film Critics`+`American Cinema Editors`+Satellite)
+
+riMod <- lmer(data=senti,score~meanSentiment +gross+budget+minute+BAFTA+`Critics Choice`+`Golden Globes`+`Chicago Film Critics`+`American Cinema Editors`+Satellite+(1|genre))
+
+mixedPred <- predict(riMod)
+slimPred <- predict(lm)
+allPred <- cbind(actual = senti$score, 
+                 mixed = mixedPred, 
+                 slim = slimPred)
+
+par(mfrow=c(1,2)) 
+plot(allPred[, "actual"], allPred[, "slim"])
+plot(allPred[, "actual"], allPred[, "mixed"])
+
+summary(lm)
+```
+
+All of the coefficients are very significant here. However, the R-squared here is just (0.06), which means the current combination of predictors may be not the optimal one. We need to further explore to decide the best predictors. We also applied the mixed model to see whether the genre variable can explain some variabilities in the outcome variable, but the result does not seem very pleasant.
+
+# Oscar Prediction
+
+## Deep Learning
+
+Instead of `score`, the critic review score, we now want to set the `winner` as our outcome variable. We want to test how much predictive power does the review texts have towards to the winner of the Oscar Best Picture. 
+
+```{r}
+senti1 <- senti %>% 
+  dplyr::select(review_clean,winner) %>% 
+  mutate(winner=normalize(winner))
+  
+splits = initial_split(senti1, .6, "winner")
+
+trainingDataWhole = training(splits)
+testingDataWhole = testing(splits)
+
+trainingLabel = as.vector(trainingDataWhole$winner)
+trainingData = c(trainingDataWhole[, -c(2)],recursive=T)
+testingLabel = as.vector(testingDataWhole$winner)
+testingData = c(testingDataWhole[, -c(2)],recursive=T)
+
+tokenizerTrain = text_tokenizer(num_words = 10000)
+fit_text_tokenizer(tokenizerTrain, trainingData)
+trainingData = texts_to_sequences(tokenizerTrain, trainingData)
+tokenizerTest = text_tokenizer(num_words = 10000)
+fit_text_tokenizer(tokenizerTest, testingData)
+testingData = texts_to_sequences(tokenizerTest, testingData)
+
+
+
+wholeLabel = as.vector(senti1$winner)
+wholeData = c(senti1[, -c(2)],recursive=T)
+tokenizerwhole = text_tokenizer(num_words = 10000)
+fit_text_tokenizer(tokenizerwhole, wholeData)
+wholeData = texts_to_sequences(tokenizerTrain, wholeData)
+
+
+
+vectorize_sequences <- function(sequences, dimension = 10000) {
+  # Creates an all-zero matrix of shape (length(sequences), dimension)
+  results <- matrix(0, nrow = length(sequences), ncol = dimension) 
+  for (i in 1:length(sequences))
+    # Sets specific indices of results[i] to 1s
+    results[i, sequences[[i]]] <- 1 
+  results
+}
+
+
+trainingData = pad_sequences(trainingData, value = 0,
+                             padding = "post", maxlen = 400)
+testingData = pad_sequences(testingData, value = 0,
+                            padding = "post", maxlen = 400)
+wholeData = pad_sequences(wholeData, value = 0,
+                            padding = "post", maxlen = 400)
+```
+
+```{r}
+vocabSize = 50000
+
+#continuous output
+model <-  keras_model_sequential() %>% 
+  layer_embedding(input_dim = vocabSize, output_dim = 16) %>%
+  layer_global_average_pooling_1d() %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1) %>%
+  compile(
+    optimizer = "rmsprop",
+    loss = "mse",
+    metrics = c("mae")
+  )
+
+xValidation = trainingData[1:500, ]
+xTraining = trainingData[501:nrow(trainingData), ]
+yValidation = trainingLabel[1:500]
+yTraining = trainingLabel[501:length(trainingLabel)]
+
+history = model %>% 
+  keras::fit(xTraining, yTraining,
+             epochs = 120, batch_size = 20,
+             validation_data = list(xValidation, yValidation),
+             verbose = 3,
+             callbacks = list(
+    callback_early_stopping(patience = 3),
+    callback_reduce_lr_on_plateau()
+  ))
+```
+
+<center><div style="text-align: center;height:60%;width:60%">![link](https://github.com/yyyoment/photos/raw/master/WeChat%20Image_20200227010153.png)</div></center>
+
+It is kind of weird that the loss on training dataset is higher than the loss on the validation dataset. We might want to adjust the loss function, learning rate and relugarization of the model to improve it.
+
+```{r fig.height=1, fig.width=6}
+# test data
+model %>% evaluate(testingData, testingLabel)
+
+test1 <- model %>% 
+  predict(wholeData)
+
+senti2 <- cbind(senti,test1)
+
+senti3 <- senti2 %>% 
+  filter(year>1997) %>% 
+  group_by(year,nominees,winner) %>% 
+  summarise(test=as.character(mean(test1))) %>% 
+  group_by(year) %>% 
+  top_n(1)
+
+senti3[5] <- 1
+
+senti4 <- senti2 %>% 
+  filter(year>1997) %>% 
+  group_by(year,nominees,winner) %>% 
+  summarise(test=as.character(mean(test1))) %>% 
+  left_join(senti3) %>% 
+  mutate(V5=ifelse(is.na(V5),0,V5))
+
+n <- senti4 %>% 
+  filter(winner==1 & V5==1) %>% 
+  nrow()
+
+n1 <- n/length(unique(senti4$year))
+n1
+
+senti4 %>% 
+  filter(winner==1) %>% 
+  mutate(ref=1) %>% 
+  ggplot(aes(year,ref,color=V5))+
+  geom_count()+
+  theme(plot.background = element_blank(),
+        panel.background = element_blank(),
+        legend.key = element_blank(),
+        legend.position="none",
+      axis.line=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank(),)+
+    scale_x_continuous(breaks=seq(1998,2020,1))+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  scale_color_gradient(low="red", high="darkgreen")
+```
+
+Our prediction model can successfully predict over 80% in the last 25 years Oscar awards. Also, we notice that most of the mistakes were before 2005. The conclusion is that reviews are playing a more and more important role in predicting Oscar. 
+
+## Logistic
+
+```{r}
+log <- senti %>% select(-label,-genres,-date,-review,-review_clean,-details) %>% keep(is.numeric) %>% mutate(winner=as.factor(winner))  %>% na.omit() 
+
+set.seed(1234)
+sample.set <- createDataPartition(log$winner, p = 0.6, list = FALSE)
+log_train <- log[sample.set, ]
+log_train <- DMwR::SMOTE(winner ~ ., as.data.frame(log_train), perc.over = 100, perc.under = 200)
+log_test <- log[-sample.set, ]
+
+logit_mod <-
+  glm(winner ~ ., family = binomial(link = 'logit'), data = log_train)
+
+summary(logit_mod)
+
+like_pred <- predict(logit_mod, log_test, type = "response")
+
+ideal_cutoff <- InformationValue::optimalCutoff(
+  actuals = log_test$winner,
+  predictedScores = like_pred,
+  optimiseFor = "Both")
+
+logit_pred <- as.factor(ifelse(like_pred > ideal_cutoff, 1, 0))
+caret::confusionMatrix(logit_pred, log_test$winner, positive = "1")
+```
+
+The accuracy and kappa for logistic regression is quite high, and we also notice that the sentiment score here is not significant. Whether a movie will win or not may not be decided by the review sentiment. It is more relevant to whether it has won in other awards and some of the movie's features, such as budget, box office revenue and duration.
